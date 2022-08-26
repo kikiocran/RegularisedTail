@@ -1,0 +1,573 @@
+
+################################################################################### 
+############################ The Simulation Codes #################################
+
+#Generate Data from the Pareto distribution, Frechet distibution and the Burr distribution
+#Transform the generated data to Zj~jlog(x[n-j+1;n]/x[n-j;n])
+#Compute bias reduced estimate of Gamma (the EVI)
+#Method is based on exponential regression model for log-spacings and Ridge regression,
+#Weighted least squares, and Regularised Weighted least square (Proposed estimator) of
+# Gamma and b_n,k
+#Compute second order parameters Rho and Beta based a 
+#proposed method by Buitendag and
+#Fraga Alves et al. (2003)
+#Compute Bias and MSE of the estimators as a functionof k for comparison.
+
+#Start the clock
+ptm<-proc.time()
+
+library(parallel)
+library(actuar)
+library(evd)
+
+
+###########################################
+#                                         #
+# A function to generate the data frame   #
+# of the sample data                      #
+#                                         #
+##########################################
+
+
+
+
+
+"data.fun"<-function(n,type=c("Pareto","Frechet","Burr"),Alpha=NA,Tau=NA,Lambda=NA)
+{
+  u<-runif(n)
+  if(type=="Pareto"){
+    data<- (1-u)^(-1/Alpha)
+  }else if(type=="Frechet"){
+    data<- (log(1/u))^(-1/Alpha)
+  }else {
+    data<- ((1-u)^(-1/Lambda)-1)^(1/Tau)
+  }
+  return(data)
+} 
+
+set.seed(1)
+n=50; m=100;Alpha=NA; Lambda=sqrt(2);Tau=sqrt(2); type="Burr";gamma=0.5;rho_range=c(-2,-.5);Rho_range=c(-2,-0.5)
+dat <- matrix(data.fun(n*m,Lambda=Lambda,Tau=Tau,type=type), ncol=m)
+# SORT THE DATA MATRIX
+ddat<- apply(dat,2,function(arg){sort(arg,decreasing=TRUE)})
+k<-3:floor(n^.99)
+
+
+########################################
+#                                      #
+# ESTIMATORS FOR RHO *NEEDED)          #
+#                                      #
+########################################
+
+# ESTIMATE RHO USING THE FRAGA ALVES 
+rho_fa<- apply(ddat, 2, function(arg){
+  FA<- sapply(1:3, function(l){
+    log(mean((log(arg[1:max(k)])-
+                log(arg[max(k)+1]))^l)/factorial(l))/l
+  })
+  Tr<- (FA[1]-FA[2])/(FA[2]-FA[3])
+  return(-abs((3*(Tr-1))/(Tr-3)))
+})
+
+# ESTIMATE RHO BY MINIMISING THE VARIANCE OF THE 
+# LEAST SQUARES ESTIMATOR OVER ALL k
+covar<- sapply(k, function(i){((1:i)/(i+1))})
+w_hat<-sapply(k, function(i){
+  (i:1)/(i+1)/sum((i:1)/(i+1))
+})
+
+
+rho<- mclapply(1:m, function(arg){
+  output = numeric(2)
+  
+  z = sapply(k, function(i){
+    (1:i)*(log(ddat[,arg][1:i])-log(ddat[,arg][2:(i+1)]))
+  })
+  
+  # ESTIMATE RHO FOR POSITIVE EVI
+  output[1] = optimise(function(r){
+    var(sapply(1:length(k), function(i){
+      return(mean(z[[i]])-cov(z[[i]],covar[[i]]^(-r))/var(covar[[i]]^(-r))*mean(covar[[i]]^(-r)))
+    }),na.rm=T)
+  }, interval=range(rho_range))$minimum
+  
+  output[2] = optimise(function(r){
+    var(sapply(1:length(k), function(i){
+      return(sum(w_hat[[i]]*z[[i]])/sum(w_hat[[i]])+(sum(w_hat[[i]]*covar[[i]]^(-r))*sum(w_hat[[i]]*z[[i]])-sum(w_hat[[i]]*covar[[i]]^(-r)*z[[i]])*(sum(w_hat[[i]]*covar[[i]]^(-r))/sum(w_hat[[i]])))/(sum(w_hat[[i]]*(covar[[i]]^(-r))^2-((sum(w_hat[[i]]*covar[[i]]^(-r)))^2/sum(w_hat[[i]])))))
+    }),na.rm=T)
+  }, interval=range(Rho_range))$minimum
+  return(output)
+}, mc.cores=1) # IMPORTANT!
+
+#, mc.cores=detectCores())
+rho<- matrix(unlist(rho),nrow=2, byrow=F)
+rho_z = rho[1,]
+rho_w = rho[2,]
+
+
+
+########################################
+#                                      #
+#          ESTIMATORS FOR BETA         #
+#                                      #
+########################################
+
+beta_fa<- sapply(1:m, function(arg){
+  covar<- ((1:max(k))/(max(k)+1))^(-rho_fa[arg])
+  z<- (1:max(k))*(log(ddat[,arg][1:max(k)])-log(ddat[,arg][2:(max(k)+1)]))
+  ((max(k)/n)^rho_fa[arg])*(mean(covar)*mean(z)-mean(covar*z))/(mean(covar)*mean(covar*z)-mean(covar^2*z))
+})
+
+beta_z<- sapply(1:m, function(arg){
+  covar<- ((1:max(k))/(max(k)+1))^(-rho[arg])
+  z<- (1:max(k))*(log(ddat[,arg][1:max(k)])-log(ddat[,arg][2:(max(k)+1)]))
+  
+  ((max(k)/n)^rho[arg])*(mean(covar)*mean(z)-mean(covar*z))/(mean(covar)*mean(covar*z)-mean(covar^2*z))
+})
+
+
+########################################################
+#                                                      #                                                      
+#     The Estimator function for the Pareto case       #
+#                                                      #
+########################################################
+
+
+
+
+'Estimator'<-function(x,k,method=c("HILL","BCHILL","LS","RR","WLS","RW")){
+  
+  z = apply(x,2,function(arg){
+    (1:k)*(log(arg[1:k])-log(arg[2:(k+1)]))
+  })
+  
+  covar<- sapply(rho_z, function(r){((1:k)/(k+1))^(-r)})
+  #covar_w<- sapply(rho_w, function(r){((1:k)/(k+1))^(-r)})
+  covar_fa<- sapply(rho_fa, function(r){((1:k)/(k+1))^(-r)})
+  
+  "Tau"<-function(Rho,B){
+    
+    #Estimating the covariate
+    covar<- sapply(Rho, function(r){((1:k)/(k+1))^(-r)})
+    
+    #The weight function
+    alph<-1/k
+    wj<-1-((1:k)/(1+k))*0.5^alph
+    w_hat_j<-wj/sum(wj)
+    w_hat<-matrix(rep(w_hat_j,m),nrow=length(w_hat_j),byrow = F)
+    
+    Kp<-(alph+1)/(2*alph+1)
+    
+    tau<-sapply(1:m, function(j){
+      S1<-sum(w_hat[,j]*covar[,j])
+      S2<-sum(w_hat[,j]*covar[,j]^2)-(sum(w_hat[,j]*covar[,j]))^2
+      Sdot<-sum(w_hat[,j]^2*(S1-covar[,j]))
+      Sdotdot<- sum(w_hat[,j]^2*(S1-covar[,j])^2) 
+      TT<-(Sdot*S2+S1*Sdotdot)/(2*Kp*(B[j]*(n/k)^Rho[j])^2*S1*S2-2*Sdot)
+      if(TT<0)
+        TT=0
+      else{
+        TT=TT
+      }
+    })
+    
+    return(tau)
+  }  
+  
+  alph<-1/k
+  wj<-1-((1:k)/(1+k))*0.5^alph
+  w_hat_j<-wj/sum(wj)
+  w_hat<-matrix(rep(w_hat_j,m),nrow=length(w_hat_j),byrow = F)
+  
+  
+  
+  
+  # ESTIMATE BETA FOR POSITIVE EVI
+  beta = sapply(1:m, function(j){
+    ((k/n)^rho_z[j])*(mean(covar[,j])*mean(z[,j])-mean(covar[,j]*z[,j]))/(mean(covar[,j])*mean(covar[,j]*z[,j])-mean((covar[,j]^2)*z[,j]))
+  })
+  #bet_we = sapply(1:m, function(j){
+  #  ((k/n)^rho_w[j])*(mean(covar_w[,j])*mean(z[,j])-mean(covar_w[,j]*z[,j]))/(mean(covar_w[,j])*mean(covar_w[,j]*z[,j])-mean((covar_w[,j]^2)*z[,j]))
+  #})
+  Fa_beta = sapply(1:m, function(j){
+    ((k/n)^rho_fa[j])*(mean(covar_fa[,j])*mean(z[,j])-mean(covar_fa[,j]*z[,j]))/(mean(covar_fa[,j])*mean(covar[,j]*z[,j])-mean((covar_fa[,j]^2)*z[,j]))
+  })
+  
+  method=match.arg(method)  
+  if(method=="HILL"){
+    EVI<- sapply(1:m,function(j){
+      est<- mean(z[,j])
+    })
+  }else if(method=="BCHILL"){
+    # THE BIAS-CORRECTED HILL ESTIMATOR
+    EVI<- sapply(1:m,function(j){
+      est<- mean(z[,j])*(1-(beta_fa[j]*(n/k)^rho_fa[j])/(1-rho_fa[j]))
+    })
+  }else if(method=="LS"){
+    # THE LEAST-SQUARES REGRESSION ESTIMATOR
+    EVI<- sapply(1:m,function(j){
+      est<- mean(z[,j])-cov(z[,j],covar[,j])/var(covar[,j])*mean(covar[,j])
+    })
+  } else if(method=="RR"){
+    # THE MSE-MINIMISING RIDGE REGRESSION ESTIMATOR
+    # WHERE BETA DEPENDS ON k
+    EVI<-sapply(1:m,function(j){
+      tau<-1/(k*(beta_z[j]*((n/k)^rho_z[j]))^2)
+      est<-mean(z[,j])-cov(z[,j],covar[,j])/(var(covar[,j])+tau)*mean(covar[,j])
+    })
+  } else if(method=="WLS"){
+    EVI<-sapply(1:m, function(j){
+      N<-sum(w_hat[,j]*covar[,j]*z[,j])-(sum(w_hat[,j]*z[,j]))*sum(w_hat[,j]*covar[,j])
+      D<-sum(w_hat[,j]*covar[,j]^2)-(sum(w_hat[,j]*covar[,j]))^2
+      bnk<-N/D
+      (sum(w_hat[,j]*z[,j])-bnk*sum(w_hat[,j]*covar[,j]))
+    })
+  } else if(method=="RW"){
+    EVI<-sapply(1:m, function(j){
+      N<-sum(w_hat[,j]*covar[,j]*z[,j])-sum(w_hat[,j]*z[,j])*sum(w_hat[,j]*covar[,j])
+      D<-(2*Tau(rho_z,beta_z)[j]+sum(w_hat[,j]*(covar[,j])^2))-(sum(w_hat[,j]*covar[,j]))^2
+      bnk<-N/D
+      (sum(w_hat[,j]*z[,j])-bnk*sum(w_hat[,j]*covar[,j]))
+    })
+    
+  }
+  
+  return(EVI)
+}
+
+
+################################################
+#                                              #
+# Estimating EVIs for different values of k    #
+#                                              #
+################################################
+
+
+
+
+EVI.H<-function(x)sapply((5:(nrow(x)-5)),function(i)Estimator(x,method="HILL",k=i))
+EVI.BCH<-function(x)sapply((5:(nrow(x)-5)),function(i)Estimator(x,method="BCHILL",k=i))
+EVI.LS<-function(x)sapply((5:(nrow(x)-5)),function(i)Estimator(x,method="LS",k=i))
+EVI.RR<-function(x)sapply((5:(nrow(x)-5)),function(i)Estimator(x,method="RR",k=i))
+EVI.RW<-function(x)sapply((5:(nrow(x)-5)),function(i)Estimator(x,method="RW",k=i))
+EVI.WLS<-function(x)sapply((5:(nrow(x)-5)),function(i)Estimator(x,method="WLS",k=i))
+
+
+
+HILL<-EVI.H(ddat)
+BCHILL<-EVI.BCH(ddat)
+LS<-EVI.LS(ddat)
+RR<-EVI.RR(ddat)
+WLS<-EVI.WLS(ddat)
+RW<-EVI.RW(ddat)
+EVI.list<-list(BCHILL=BCHILL,HILL=HILL,LS=LS,RR=RR,WLS=WLS,RW=RW)
+
+#Stop the clock
+proc.time()-ptm
+
+
+####################################
+#                                  #
+#    Bias and MSE functions        #
+#                                  #
+####################################
+
+
+"MSE.fun"<-function(x,gamma){mean((x-gamma)^2,na.rm=TRUE)}
+"Bias.fun"<-function(x,gamma){(mean(x,na.rm = TRUE)-gamma)}
+
+
+#######################################
+#                                     #
+#Compute Bias and MSE for each K      #
+#                                     #
+#######################################
+
+
+Bias<-lapply(EVI.list,function(x)
+  apply(x, 2, function(y)Bias.fun(y,gamma))
+)
+MSE<-lapply(EVI.list,function(x)
+  apply(x, 2, function(y)MSE.fun(y,gamma))
+)
+
+
+
+par(mar=c(4,4,1,1))
+
+
+
+
+
+##Plot of Bias
+plot(Bias$BCHILL,type="l",xlab = "k",lwd=2,ylab = "Bias",lty=1,ylim=c(-0.5,0.5))
+sapply(2:length(Bias), function(j)lines(Bias[[j]],lty=j,col=j,lwd=2))
+legend("bottomleft",legend=c("BCHILL","HILL","LS","RR","WLS","RWLS"),lty=1:6,col=1:6)
+abline(h=0,col="black")
+
+
+
+
+
+##Plot of MSE
+plot(MSE$BCHILL,type = "l",xlab = "k",ylab = "MSE",lwd=2,lty=1,ylim=c(0,0.2))
+sapply(2:length(MSE), function(j)lines(MSE[[j]],lty=j,col=j,lwd=2))
+legend("topleft",legend =c("BCHILL","HILL","LS","RR","WLS","RWLS"),lty=1:6,col=1:6)
+
+
+
+########################################################################################
+
+############################ The Application Codes #####################################
+
+#Generate Data from the Pareto distribution, Frechet distibution and the Burr distribution
+#Transform the generated data to Zj~jlog(x[n-j+1;n]/x[n-j;n])
+#Compute bias reduced estimate of Gamma (the EVI)
+#Method is based on exponential regression model for log-spacings and Ridge regression,
+#Weighted least squares (proposed), and Regularised Weighted least square (Proposed estimator) of
+#Gamma and b_n,k
+#Compute second order parameters Rho and Beta 
+#based a proposed method by Buitendag (Minimum variance) and
+#Fraga Alves et al. (2003)
+#Produces plot of the EVI as a function of k.
+
+
+#loading required Data
+library(ReIns)
+library(parallel)
+#library(actuar)
+#library(evd)
+
+
+#Reading in the required data
+##Subsetting top 10% data points
+data(soa)
+Sub_soa<-subset(soa,size>quantile(soa$size,0.9))
+
+
+m=1;rho_range=c(-2,-.5)
+dat <- matrix(Sub_soa$size, ncol=m)
+#dat <- matrix(data.fun(n*m,Alpha=Alpha,type=type), ncol=m)
+
+# SORT THE DATA MATRIX
+ddat<- apply(dat,2,function(arg){sort(arg,decreasing=TRUE)})
+
+n<-nrow(ddat)
+k<-3:floor(n^.99)
+
+
+########################################
+#                                      #
+# ESTIMATORS FOR RHO *NEEDED)          #
+#                                      #
+########################################
+
+# ESTIMATE RHO USING THE FRAGA ALVES 
+rho_fa<- apply(ddat, 2, function(arg){
+  FA<- sapply(1:3, function(l){
+    log(mean((log(arg[1:max(k)])-
+                log(arg[max(k)+1]))^l)/factorial(l))/l
+  })
+  Tr<- (FA[1]-FA[2])/(FA[2]-FA[3])
+  return(-abs((3*(Tr-1))/(Tr-3)))
+})
+
+# ESTIMATE RHO BY MINIMISING THE VARIANCE OF THE 
+# LEAST SQUARES ESTIMATOR OVER ALL k
+covar<- sapply(k, function(i){((1:i)/(i+1))})
+w_hat<-sapply(k, function(i){
+  (i:1)/(i+1)/sum((i:1)/(i+1))
+})
+
+
+rho<- mclapply(1:m, function(arg){
+  output = numeric(2)
+  
+  z = sapply(k, function(i){
+    (1:i)*(log(ddat[,arg][1:i])-log(ddat[,arg][2:(i+1)]))
+  })
+  
+  # ESTIMATE RHO FOR POSITIVE EVI
+  output[1] = optimise(function(r){
+    var(sapply(1:length(k), function(i){
+      return(mean(z[[i]])-cov(z[[i]],covar[[i]]^(-r))/var(covar[[i]]^(-r))*mean(covar[[i]]^(-r)))
+    }),na.rm=T)
+  }, interval=range(rho_range))$minimum
+  
+  output[2] = optimise(function(r){
+    var(sapply(1:length(k), function(i){
+      return(sum(w_hat[[i]]*z[[i]])/sum(w_hat[[i]])+(sum(w_hat[[i]]*covar[[i]]^(-r))*sum(w_hat[[i]]*z[[i]])-sum(w_hat[[i]]*covar[[i]]^(-r)*z[[i]])*(sum(w_hat[[i]]*covar[[i]]^(-r))/sum(w_hat[[i]])))/(sum(w_hat[[i]]*(covar[[i]]^(-r))^2-((sum(w_hat[[i]]*covar[[i]]^(-r)))^2/sum(w_hat[[i]])))))
+    }),na.rm=T)
+  }, interval=range(Rho_range))$minimum
+  return(output)
+}, mc.cores=1) # IMPORTANT!
+
+#, mc.cores=detectCores())
+rho<- matrix(unlist(rho),nrow=2, byrow=F)
+rho_z = rho[1,]
+rho_w = rho[2,]
+
+
+
+########################################
+#                                      #
+#          ESTIMATORS FOR BETA         #
+#                                      #
+########################################
+
+beta_fa<- sapply(1:m, function(arg){
+  covar<- ((1:max(k))/(max(k)+1))^(-rho_fa[arg])
+  z<- (1:max(k))*(log(ddat[,arg][1:max(k)])-log(ddat[,arg][2:(max(k)+1)]))
+  ((max(k)/n)^rho_fa[arg])*(mean(covar)*mean(z)-mean(covar*z))/(mean(covar)*mean(covar*z)-mean(covar^2*z))
+})
+
+beta_z<- sapply(1:m, function(arg){
+  covar<- ((1:max(k))/(max(k)+1))^(-rho[arg])
+  z<- (1:max(k))*(log(ddat[,arg][1:max(k)])-log(ddat[,arg][2:(max(k)+1)]))
+  
+  ((max(k)/n)^rho[arg])*(mean(covar)*mean(z)-mean(covar*z))/(mean(covar)*mean(covar*z)-mean(covar^2*z))
+})
+
+
+########################################################
+#                                                      #                                                      
+#     The Estimator function for the Pareto case       #
+#                                                      #
+########################################################
+
+
+
+'Estimator'<-function(x,k,method=c("HILL","BCHILL","LS","RR","WLS","RW")){
+  
+  z = apply(x,2,function(arg){
+    (1:k)*(log(arg[1:k])-log(arg[2:(k+1)]))
+  })
+  
+  covar<- sapply(rho_z, function(r){((1:k)/(k+1))^(-r)})
+  covar_fa<- sapply(rho_fa, function(r){((1:k)/(k+1))^(-r)})
+  
+  "Tau"<-function(Rho,B){
+    
+    #Estimating the covariate
+    covar<- sapply(Rho, function(r){((1:k)/(k+1))^(-r)})
+    
+    #The weight function
+    alph<-k
+    wj<-1-((1:k)/(1+k))*0.5^alph
+    w_hat_j<-wj/sum(wj)
+    w_hat<-matrix(rep(w_hat_j,m),nrow=length(w_hat_j),byrow = F)
+    
+    Kp<-(alph+1)/(2*alph+1)
+    
+    tau<-sapply(1:m, function(j){
+      S1<-sum(w_hat[,j]*covar[,j])
+      S2<-sum(w_hat[,j]*covar[,j]^2)-(sum(w_hat[,j]*covar[,j]))^2
+      Sdot<-sum(w_hat[,j]^2*(S1-covar[,j]))
+      Sdotdot<- sum(w_hat[,j]^2*(S1-covar[,j])^2) 
+      TT<-(Sdot*S2+S1*Sdotdot)/(2*Kp*(B[j]*(n/k)^Rho[j])^2*S1*S2-2*Sdot)
+      if(TT<0)
+        TT=0
+      else{
+        TT=TT
+      }
+    })
+    
+    return(tau)
+  }  
+
+  
+  alph<-k
+  wj<-1-((1:k)/(1+k))*0.5^alph
+  w_hat_j<-wj/sum(wj)
+  w_hat<-matrix(rep(w_hat_j,m),nrow=length(w_hat_j),byrow = F)
+  
+
+  
+  # ESTIMATE BETA FOR POSITIVE EVI
+  beta = sapply(1:m, function(j){
+    ((k/n)^rho_z[j])*(mean(covar[,j])*mean(z[,j])-mean(covar[,j]*z[,j]))/(mean(covar[,j])*mean(covar[,j]*z[,j])-mean((covar[,j]^2)*z[,j]))
+  })
+
+  Fa_beta = sapply(1:m, function(j){
+    ((k/n)^rho_fa[j])*(mean(covar_fa[,j])*mean(z[,j])-mean(covar_fa[,j]*z[,j]))/(mean(covar_fa[,j])*mean(covar[,j]*z[,j])-mean((covar_fa[,j]^2)*z[,j]))
+  })
+  
+  method=match.arg(method)  
+  if(method=="HILL"){
+    EVI<- sapply(1:m,function(j){
+      est<- mean(z[,j])
+    })
+  }else if(method=="BCHILL"){
+    # THE BIAS-CORRECTED HILL ESTIMATOR
+    EVI<- sapply(1:m,function(j){
+      est<- mean(z[,j])*(1-(beta_fa[j]*(n/k)^rho_fa[j])/(1-rho_fa[j]))
+    })
+  }else if(method=="LS"){
+    # THE LEAST-SQUARES REGRESSION ESTIMATOR
+    EVI<- sapply(1:m,function(j){
+      est<- mean(z[,j])-cov(z[,j],covar[,j])/var(covar[,j])*mean(covar[,j])
+    })
+  } else if(method=="RR"){
+    # THE MSE-MINIMISING RIDGE REGRESSION ESTIMATOR
+    # WHERE BETA DEPENDS ON k
+    EVI<-sapply(1:m,function(j){
+      tau<-1/(k*(beta_z[j]*((n/k)^rho_z[j]))^2)
+      est<-mean(z[,j])-cov(z[,j],covar[,j])/(var(covar[,j])+tau)*mean(covar[,j])
+    })
+  } else if(method=="WLS"){
+    EVI<-sapply(1:m, function(j){
+      N<-sum(w_hat[,j]*covar[,j]*z[,j])-(sum(w_hat[,j]*z[,j]))*sum(w_hat[,j]*covar[,j])
+      D<-sum(w_hat[,j]*covar[,j]^2)-(sum(w_hat[,j]*covar[,j]))^2
+      bnk<-N/D
+      (sum(w_hat[,j]*z[,j])-bnk*sum(w_hat[,j]*covar[,j]))
+    })
+  } else if(method=="RW"){
+    EVI<-sapply(1:m, function(j){
+      N<-sum(w_hat[,j]*covar[,j]*z[,j])-sum(w_hat[,j]*z[,j])*sum(w_hat[,j]*covar[,j])
+      D<-(2*Tau(rho_z,beta_z)[j]+sum(w_hat[,j]*(covar[,j])^2))-(sum(w_hat[,j]*covar[,j]))^2
+      bnk<-N/D
+      (sum(w_hat[,j]*z[,j])-bnk*sum(w_hat[,j]*covar[,j]))
+    })
+    
+  }
+  
+  return(EVI)
+}
+
+
+
+################################################
+#                                              #
+# Estimating EVIs for different values of k    #
+#                                              #
+################################################
+
+EVI.H<-function(x)sapply((4:(nrow(x))),function(i)Estimator(x,method="HILL",k=i))
+EVI.BCH<-function(x)sapply((4:(nrow(x))),function(i)Estimator(x,method="BCHILL",k=i))
+EVI.LS<-function(x)sapply((4:(nrow(x))),function(i)Estimator(x,method="LS",k=i))
+EVI.RR<-function(x)sapply((4:(nrow(x))),function(i)Estimator(x,method="RR",k=i))
+EVI.RW<-function(x)sapply((4:(nrow(x))),function(i)Estimator(x,method="RW",k=i))
+EVI.WLS<-function(x)sapply((4:(nrow(x))),function(i)Estimator(x,method="WLS",k=i))
+
+
+HILL<-EVI.H(ddat)
+BCHILL<-EVI.BCH(ddat)
+LS<-EVI.LS(ddat)
+RR<-EVI.RR(ddat)
+WLS<-EVI.WLS(ddat)
+RW<-EVI.RW(ddat)
+EVI.list<-list(HILL=HILL,BCHILL=BCHILL,LS=LS,RR=RR,WLS=WLS,RW=RW)
+
+par(mar=c(4,4,1,1))
+
+
+
+
+##Plot of the EVI as a fubction of k
+plot(EVI.list$HILL,type="l",main = "",xlab = "k",lwd=2,ylab = "EVI",ylim = c(0.0, .450),lty=1)
+sapply(2:length(EVI.list), function(j)lines(EVI.list[[j]],lty=j,col=j,lwd=2))
+legend("topright",legend=c("HILL","BCHILL","LS","RR","WLS_Random","RWLS1"),lty=1:6,lwd = 2,col=1:6,cex = 0.7)
+
+
+
+
